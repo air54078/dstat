@@ -71,7 +71,19 @@ export async function GET() {
     const topPaths = (zone?.topPaths ?? []).map((group) => ({
       method: "HTTP", path: group.dimensions?.clientRequestPath ?? "/", requests: `${((group.count ?? 0) / 1000).toFixed(1)}k`, latency: "—", status: "—",
     }));
-    const result = { configured: true, current, series: series.map((point) => ({ time: point.time.slice(11, 16), value: (point.bytes * 8) / 60 / 1e9 })), topPaths, source: hostname, refreshedAt: end.toISOString() };
+    const result = {
+      configured: true,
+      current,
+      series: series.map((point) => ({
+        time: point.time.slice(11, 16),
+        bandwidth: (point.bytes * 8) / 60 / 1e9,
+        requests: point.requests,
+        bytes: point.bytes,
+      })),
+      topPaths,
+      source: hostname,
+      refreshedAt: end.toISOString(),
+    };
     analyticsCache = { expiresAt: Date.now() + UPSTREAM_CACHE_MS, payload: result };
     return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

@@ -2,74 +2,125 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-type Protocol = "L7 HTTP" | "L4 TCP" | "L4 UDP";
-type Point = { time: string; value: number };
+type ChartMetric = "bandwidth" | "requests" | "data";
+type Point = { time: string; bandwidth: number; requests: number; bytes: number };
 type PathRow = { method: string; path: string; requests: string; latency: string; status: string };
-const protocolOptions: Protocol[] = ["L7 HTTP", "L4 TCP", "L4 UDP"];
-const initialPoints: Point[] = [{ time: "—", value: 0 }, { time: "—", value: 0 }];
+
 const REFRESH_SECONDS = 1;
-function formatNumber(value: number, decimals = 2) {
-  return value.toLocaleString("en-US", { maximumFractionDigits: decimals, minimumFractionDigits: decimals });
+const emptyPoints: Point[] = Array.from({ length: 6 }, (_, index) => ({ time: `-${5 - index}m`, bandwidth: 0, requests: 0, bytes: 0 }));
+
+const metricOptions: Array<{ id: ChartMetric; label: string; detail: string }> = [
+  { id: "bandwidth", label: "Bandwidth", detail: "Edge response throughput" },
+  { id: "requests", label: "Requests", detail: "Requests per minute" },
+  { id: "data", label: "Data", detail: "Edge response bytes" },
+];
+
+function compact(value: number, digits = 1) {
+  return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: digits }).format(value);
 }
-function MiniSparkline({ values, color = "#a7f36b" }: { values: number[]; color?: string }) {
-  const max = Math.max(...values); const min = Math.min(...values);
-  const points = values.map((value, index) => `${(index / (values.length - 1)) * 100},${34 - ((value - min) / Math.max(max - min, 1)) * 28}`).join(" ");
-  return <svg className="mini-sparkline" viewBox="0 0 100 38" preserveAspectRatio="none" aria-hidden="true"><polyline points={points} fill="none" stroke={color} strokeWidth="2.2" vectorEffect="non-scaling-stroke" /></svg>;
+
+function rate(value: number) {
+  if (value >= 1) return `${value.toFixed(2)} Gb/s`;
+  if (value > 0) return `${(value * 1000).toFixed(1)} Mb/s`;
+  return "0.00 Gb/s";
 }
-function ThroughputChart({ points }: { points: Point[] }) {
-  const max = 10;
-  const linePoints = points.map((point, index) => `${5 + (index / (points.length - 1)) * 90},${92 - (point.value / max) * 78}`).join(" ");
-  const areaPoints = `5,96 ${linePoints} 95,96`;
-  return <div className="chart-wrap"><div className="chart-y-labels" aria-hidden="true"><span>10 Gbps</span><span>7.5</span><span>5.0</span><span>2.5</span><span>0</span></div><svg className="throughput-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="即時吞吐量折線圖">{[18, 37, 56, 75, 94].map((y) => <line key={y} x1="5" x2="95" y1={y} y2={y} className="chart-grid" />)}<polygon points={areaPoints} className="chart-area" /><polyline points={linePoints} className="chart-line" /><circle cx="95" cy={92 - (points[points.length - 1].value / max) * 78} r="1.7" className="chart-dot" /></svg><div className="chart-x-labels" aria-hidden="true"><span>14:27:40</span><span>14:27:50</span><span>14:28:00</span><span>14:28:15</span><span>現在</span></div></div>;
+
+function chartValues(points: Point[], metric: ChartMetric) {
+  if (metric === "bandwidth") {
+    const useMbps = Math.max(...points.map((point) => point.bandwidth), 0) < 1;
+    return { values: points.map((point) => useMbps ? point.bandwidth * 1000 : point.bandwidth), unit: useMbps ? "Mb/s" : "Gb/s" };
+  }
+  if (metric === "requests") return { values: points.map((point) => point.requests), unit: "RPM" };
+  return { values: points.map((point) => point.bytes / 1024 / 1024), unit: "MiB" };
 }
-function MetricCard({ label, value, unit, delta, values, color = "#a7f36b" }: { label: string; value: string; unit: string; delta: string; values: number[]; color?: string }) {
-  return <article className="metric-card"><div className="metric-heading"><span>{label}</span><span className="metric-menu">···</span></div><div className="metric-value">{value}<small>{unit}</small></div><div className="metric-footer"><span className="positive">↗ {delta}</span><span className="muted">vs. last 5 min</span></div><MiniSparkline values={values} color={color} /></article>;
+
+function niceMax(value: number) {
+  if (value <= 0) return 1;
+  const exponent = 10 ** Math.floor(Math.log10(value));
+  const fraction = value / exponent;
+  const rounded = fraction <= 1 ? 1 : fraction <= 2 ? 2 : fraction <= 5 ? 5 : 10;
+  return rounded * exponent;
 }
+
+function axisLabel(value: number, unit: string) {
+  if (unit === "RPM") return `${compact(value)} RPM`;
+  if (unit === "MiB") return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} MiB`;
+  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${unit}`;
+}
+
+function SelectedMetricChart({ metric, points }: { metric: ChartMetric; points: Point[] }) {
+  const safePoints = points.length > 1 ? points : emptyPoints;
+  const { values, unit } = chartValues(safePoints, metric);
+  const maximum = niceMax(Math.max(...values, 0) * 1.12);
+  const line = values.map((value, index) => {
+    const x = 4 + (index / Math.max(values.length - 1, 1)) * 92;
+    const y = 91 - Math.min(value / maximum, 1) * 78;
+    return `${x},${y}`;
+  }).join(" ");
+  const area = `4,94 ${line} 96,94`;
+  const lastY = 91 - Math.min(values[values.length - 1] / maximum, 1) * 78;
+  const labels = [1, .75, .5, .25, 0].map((ratio) => axisLabel(maximum * ratio, unit));
+  const xIndexes = [0, Math.floor((safePoints.length - 1) / 4), Math.floor((safePoints.length - 1) / 2), Math.floor((safePoints.length - 1) * .75), safePoints.length - 1];
+
+  return <div className="chart-area-wrap">
+    <div className="chart-y-axis" aria-hidden="true">{labels.map((label) => <span key={label}>{label}</span>)}</div>
+    <svg className="main-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${metricOptions.find((item) => item.id === metric)?.label} chart`}>
+      {[13, 32.5, 52, 71.5, 91].map((y) => <line key={y} x1="4" x2="96" y1={y} y2={y} className="chart-grid-line" />)}
+      <polygon points={area} className="chart-fill" />
+      <polyline points={line} className="chart-series" />
+      <circle cx="96" cy={lastY} r="1.25" className="chart-last-point" />
+    </svg>
+    <div className="chart-x-axis" aria-hidden="true">{xIndexes.map((index, position) => <span key={`${index}-${position}`}>{position === xIndexes.length - 1 ? "NOW" : safePoints[index].time}</span>)}</div>
+  </div>;
+}
+
 export default function Home() {
-  const [protocol, setProtocol] = useState<Protocol>("L7 HTTP");
-  const [isRunning, setIsRunning] = useState(true); const [showRunner, setShowRunner] = useState(false);
-  const [duration, setDuration] = useState("5 min"); const [load, setLoad] = useState("120k rpm");
-  const [agentEndpoint, setAgentEndpoint] = useState("Cloudflare Analytics");
-  const [points, setPoints] = useState<Point[]>(initialPoints);
-  const [pathRows, setPathRows] = useState<PathRow[]>([]);
-  const [sourceStatus, setSourceStatus] = useState("connecting");
+  const [metric, setMetric] = useState<ChartMetric>("bandwidth");
+  const [points, setPoints] = useState<Point[]>(emptyPoints);
+  const [paths, setPaths] = useState<PathRow[]>([]);
+  const [status, setStatus] = useState<"connecting" | "live" | "offline">("connecting");
   const [refreshing, setRefreshing] = useState(false);
-  const [secondsToRefresh, setSecondsToRefresh] = useState(REFRESH_SECONDS);
-  const [refreshNonce, setRefreshNonce] = useState(0);
-  const [metrics, setMetrics] = useState({ throughput: 0, rpm: 0, packets: 0, latency: 0 });
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [lastUpdated, setLastUpdated] = useState<string | null>(null);
+  const [current, setCurrent] = useState({ throughput: 0, rpm: 0 });
+
   useEffect(() => {
-    let cancelled = false;
-    const readAnalytics = async () => {
-      if (!isRunning) return;
+    let closed = false;
+    const poll = async () => {
       setRefreshing(true);
       try {
         const response = await fetch(`/api/cloudflare/analytics?t=${Date.now()}`, { cache: "no-store" });
         const data = await response.json();
-        if (cancelled) return;
-        if (!response.ok) throw new Error(data.error ?? "Cloudflare Analytics unavailable");
-        setMetrics(data.current ?? { throughput: 0, rpm: 0, packets: 0, latency: 0 });
-        setPoints(data.series?.length ? data.series : initialPoints);
-        setPathRows(data.topPaths ?? []);
-        setSourceStatus("live");
-      } catch { if (!cancelled) { setSourceStatus("offline"); setMetrics({ throughput: 0, rpm: 0, packets: 0, latency: 0 }); setPoints(initialPoints); setPathRows([]); } }
-      finally { if (!cancelled) { setRefreshing(false); setSecondsToRefresh(REFRESH_SECONDS); } }
+        if (closed) return;
+        if (!response.ok) throw new Error(data.error ?? "Analytics unavailable");
+        setPoints(data.series?.length ? data.series : emptyPoints);
+        setPaths(data.topPaths ?? []);
+        setCurrent({ throughput: data.current?.throughput ?? 0, rpm: data.current?.rpm ?? 0 });
+        setLastUpdated(data.refreshedAt ?? new Date().toISOString());
+        setStatus("live");
+      } catch {
+        if (!closed) setStatus("offline");
+      } finally {
+        if (!closed) setRefreshing(false);
+      }
     };
-    readAnalytics(); const interval = window.setInterval(readAnalytics, REFRESH_SECONDS * 1000);
-    return () => { cancelled = true; window.clearInterval(interval); };
-  }, [isRunning, refreshNonce]);
-  useEffect(() => {
-    if (!isRunning) return;
-    const timer = window.setInterval(() => setSecondsToRefresh((seconds) => seconds > 1 ? seconds - 1 : REFRESH_SECONDS), 1000);
-    return () => window.clearInterval(timer);
-  }, [isRunning]);
-  const chartPoints = useMemo(() => points.length >= 2 ? points : initialPoints, [points]);
-  return <main className="app-shell">
-    <aside className="sidebar"><div className="brand"><div className="brand-mark">d</div><span>dstat</span><sup>beta</sup></div><div className="workspace-switcher"><div className="workspace-avatar">S</div><div><strong>Staging / edge</strong><span>Personal workspace</span></div><span className="chevron">⌄</span></div><button className="new-test-button" onClick={() => setShowRunner(true)}><span>＋</span> New test <kbd>⌘ K</kbd></button><nav className="main-nav" aria-label="主選單"><div className="nav-label">Workspace</div><a className="nav-item active" href="#overview"><span>◈</span> Overview</a><a className="nav-item" href="#live-tests"><span>◉</span> Live tests <i>3</i></a><a className="nav-item" href="#history"><span>◷</span> History</a><div className="nav-label nav-label-spaced">Infrastructure</div><a className="nav-item" href="#nodes"><span>⌘</span> Nodes <i className="dot-count">6</i></a><a className="nav-item" href="#routes"><span>⌁</span> Routes</a><a className="nav-item" href="#settings"><span>⚙</span> Settings</a></nav><div className="sidebar-bottom"><div className="connection-status"><span className="status-dot" /><span>Cloudflare edge</span><strong>connected</strong></div><div className="user-row"><div className="user-avatar">L</div><div><strong>Leo Chen</strong><span>admin</span></div><span className="more">···</span></div></div></aside>
-    <section className="content" id="overview"><header className="topbar"><div className="breadcrumbs"><span>Cloudflare Analytics</span><b>/</b><strong>Overview</strong></div><div className="top-actions"><div className="system-time"><span className="status-dot" /> {sourceStatus === "live" ? "Live" : "Waiting"} <span className="time-separator">|</span> {refreshing ? "updating" : `${secondsToRefresh}s refresh`}</div><button className="icon-button" aria-label="立即刷新" onClick={() => setRefreshNonce((nonce) => nonce + 1)}>↻<span className="notification-dot" /></button><div className="small-avatar">LC</div></div></header><div className="page-heading"><div><div className="eyebrow"><span className="live-pulse" /> Cloudflare telemetry</div><h1>Traffic cockpit</h1><p>Real-time edge analytics without generating load on your origin.</p></div><div className="heading-actions"><button className="secondary-button" onClick={() => setShowRunner(true)}>Configure</button><button className="primary-button" onClick={() => setIsRunning((running) => !running)}>{isRunning ? "Pause stream" : "Resume stream"}<span>↗</span></button></div></div>
-      <div className="target-bar"><div className="target-info"><div className="target-icon">⌁</div><div><span className="target-label">Cloudflare hostname</span><strong>dstat.kdns.fr</strong></div><span className="target-tag">EDGE DATA</span></div><div className="target-meta"><span><span className="tiny-dot" /> {sourceStatus === "live" ? "Analytics live" : "Waiting for data"}</span><span className="meta-divider" /><span>1 sec poll · 5 minute window</span><button aria-label="更多目標選項">···</button></div></div>
-      <section className="monitor-layout"><article className="panel graph-details"><div className="details-title"><span>Graph Details</span><small>A default dstat</small></div><div className="details-rule" /><dl><div><dt>Graph Name</dt><dd>Cloudflare Edge Traffic</dd></div><div><dt>Hostname</dt><dd>dstat.kdns.fr <button className="copy-button" aria-label="複製主機名稱" onClick={() => navigator.clipboard?.writeText("dstat.kdns.fr")}>▣</button></dd></div><div><dt>Protocol</dt><dd>{protocol}</dd></div><div><dt>Refresh Rate</dt><dd>1 second</dd></div><div><dt>Bandwidth</dt><dd>{formatNumber(metrics.throughput)} Gbps</dd></div></dl><div className="reminder-box"><strong>REMINDER</strong><p>Cloudflare HTTP Analytics 是唯讀資料。L4 TCP/UDP 封包需要 Spectrum 或 Network Analytics。</p></div></article><article className="panel large-chart-panel"><div className="panel-heading"><div><div className="panel-kicker">LIVE EDGE GRAPH</div><h2>Traffic throughput</h2></div><div className="chart-legend"><span className="legend-line" /> edge response <strong>{formatNumber(metrics.throughput)} Gbps</strong></div></div><div className="chart-toolbar"><div className="range-tabs"><button>1m</button><button className="selected">5m</button><button>15m</button><button>1h</button></div><div className="chart-actions"><span className="chart-live"><span className="status-dot" /> {refreshing ? "updating" : "streaming"}</span><button aria-label="立即刷新" onClick={() => setRefreshNonce((nonce) => nonce + 1)}>↻</button><button aria-label="更多圖表選項">···</button></div></div><ThroughputChart points={chartPoints} /><div className="chart-footnote">1 秒更新介面；Cloudflare Analytics 仍可能以每分鐘資料桶回傳</div></article></section>
-      <section className="metric-grid" aria-label="即時指標"><MetricCard label="Throughput" value={formatNumber(metrics.throughput)} unit="Gbps" delta={sourceStatus === "live" ? "live" : "—"} values={points.map((point) => point.value)} /><MetricCard label="Requests" value={formatNumber(metrics.rpm, 1)} unit="rpm" delta={sourceStatus === "live" ? "live" : "—"} values={points.map((point) => point.value)} color="#e4b35b" /><MetricCard label="Packets" value={formatNumber(metrics.packets)} unit="Mpps" delta="HTTP only" values={[0, 0]} color="#8fb6ff" /><MetricCard label="p99 latency" value={formatNumber(metrics.latency, 0)} unit="ms" delta="Cloudflare API" values={[0, 0]} color="#da8dff" /></section>
-      <section className="dashboard-grid"><article className="panel endpoints-panel" id="routes"><div className="panel-heading"><div><div className="panel-kicker">TOP ROUTES</div><h2>Request breakdown</h2></div><button className="view-all">Cloudflare ↗</button></div><div className="table-wrap"><table><thead><tr><th>PATH</th><th>REQUESTS</th><th>p99</th><th>SUCCESS</th></tr></thead><tbody>{pathRows.length ? pathRows.map((row) => <tr key={row.path}><td><span className="method get">HTTP</span><code>{row.path}</code></td><td>{row.requests}</td><td>{row.latency}</td><td>{row.status}</td></tr>) : <tr><td colSpan={4}>Waiting for Cloudflare Analytics data…</td></tr>}</tbody></table></div></article><article className="panel nodes-panel" id="nodes"><div className="panel-heading"><div><div className="panel-kicker">EDGE SOURCE</div><h2>Data health</h2></div><button className="view-all">Cloudflare ↗</button></div><div className="node-list"><div className="node-row"><div className="node-name"><span className={`status-dot ${sourceStatus === "live" ? "" : "warning"}`} /><div><strong>Cloudflare Analytics</strong><span>Account Analytics · read-only</span></div></div><div className="node-load"><span>{sourceStatus}</span><span>1 sec poll</span></div></div><div className="node-row"><div className="node-name"><span className="status-dot warning" /><div><strong>TCP / UDP metrics</strong><span>Requires Spectrum / Network Analytics</span></div></div><div className="node-load"><span>not connected</span><span>—</span></div></div></div><div className="nodes-footer"><span><span className="status-dot" /> origin protected</span><span><span className="status-dot warning" /> packets unavailable</span></div></article></section><footer className="app-footer"><span>介面每 1 秒更新；Cloudflare 資料可能以每分鐘資料桶延遲。</span><span>API <span className="status-dot" /> {sourceStatus}</span></footer></section>
-    {showRunner && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowRunner(false); }}><section className="runner-modal" role="dialog" aria-modal="true" aria-labelledby="runner-title"><div className="modal-top"><div><div className="panel-kicker">TEST RUNNER</div><h2 id="runner-title">Launch a traffic test</h2></div><button className="close-button" onClick={() => setShowRunner(false)} aria-label="關閉">×</button></div><p className="modal-copy">Cloudflare Analytics is read-only. It observes traffic already passing through the edge and does not generate load on your origin.</p><label className="field-label">Protocol</label><div className="protocol-switch">{protocolOptions.map((option) => <button key={option} className={protocol === option ? "active" : ""} onClick={() => setProtocol(option)}>{option}</button>)}</div><label className="field-label">Target URL / hostname</label><input className="text-input" defaultValue="dstat.kdns.fr" /><div className="field-row"><div><label className="field-label" htmlFor="duration">Duration</label><select id="duration" value={duration} onChange={(event) => setDuration(event.target.value)}><option>1 min</option><option>5 min</option><option>15 min</option><option>30 min</option></select></div><div><label className="field-label" htmlFor="load">Load profile</label><select id="load" value={load} onChange={(event) => setLoad(event.target.value)}><option>30k rpm</option><option>120k rpm</option><option>250k rpm</option><option>1 Gbps burst</option></select></div></div><label className="field-label">Data source</label><input className="text-input mono-input" value={agentEndpoint} onChange={(event) => setAgentEndpoint(event.target.value)} /><div className="agent-note"><span className="status-dot" /><span>Cloudflare Analytics connected · no origin load generated</span></div><div className="modal-actions"><button className="secondary-button" onClick={() => setShowRunner(false)}>Close</button><button className="primary-button" onClick={() => setShowRunner(false)}>Agent required for active test <span>↗</span></button></div></section></div>}
+    poll();
+    const interval = window.setInterval(poll, REFRESH_SECONDS * 1000);
+    return () => { closed = true; window.clearInterval(interval); };
+  }, [refreshKey]);
+
+  const selected = metricOptions.find((item) => item.id === metric)!;
+  const totalBytes = useMemo(() => points.reduce((sum, point) => sum + point.bytes, 0), [points]);
+  const latestUpdate = lastUpdated ? new Date(lastUpdated).toLocaleTimeString("zh-TW", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
+  const selectedValue = metric === "bandwidth" ? rate(current.throughput) : metric === "requests" ? `${compact(current.rpm)} RPM` : `${(totalBytes / 1024 / 1024).toFixed(1)} MiB`;
+
+  return <main className="dstat-app">
+    <aside className="dstat-sidebar"><a className="dstat-logo" href="#top"><span>⌁</span> dstat.space</a><nav><a className="side-link active" href="#top">Dashboard</a><p className="nav-group">Views &amp; tools</p><a className="side-link" href="#routes">Traffic routes</a><a className="side-link" href="#routes">Edge overview</a><p className="nav-group">Dstat</p><a className="side-link" href="#graph">Layer 7 <span>›</span></a><a className="side-link" href="#graph">Layer 4 <span>›</span></a></nav><div className="sidebar-source"><span className={`live-dot ${status}`} /> <div><strong>{status === "live" ? "Cloudflare connected" : "Cloudflare waiting"}</strong><small>Read-only edge telemetry</small></div></div></aside>
+    <section className="dstat-content" id="top"><header className="monitor-header"><div><p>Cloudflare Analytics</p><h1>Traffic dashboard</h1></div><div className="header-status"><span className={`live-dot ${status}`} /> {refreshing ? "Updating…" : "1 second UI refresh"}<button type="button" onClick={() => setRefreshKey((key) => key + 1)}>Refresh now</button></div></header>
+      <section className="notice-strip" aria-label="Monitor status"><div><strong>EDGE TRAFFIC</strong><span>dstat.kdns.fr</span></div><div><strong>NO ORIGIN LOAD</strong><span>Cloudflare-only collection</span></div><div><strong>{status === "live" ? "LIVE" : "WAITING"}</strong><span>Last check {latestUpdate}</span></div></section>
+      <section className="graph-layout" id="graph"><aside className="graph-details"><div className="details-heading"><h2>Graph Details</h2><p>Cloudflare edge monitor</p></div><div className="details-divider" /><dl><div><dt>Graph Name</dt><dd>{selected.label}</dd></div><div><dt>Hostname</dt><dd>dstat.kdns.fr <button type="button" onClick={() => navigator.clipboard?.writeText("dstat.kdns.fr")} aria-label="複製網域">▣</button></dd></div><div><dt>Source</dt><dd>Cloudflare HTTP Analytics</dd></div><div><dt>Display</dt><dd>{selected.detail}</dd></div><div><dt>Refresh</dt><dd>UI every 1 second</dd></div></dl><div className="reminder"><strong>NOTE</strong><p>Cloudflare HTTP Analytics 的原始資料可能以每分鐘資料桶更新；這個頁面不會對你的 origin 發送測試流量。</p></div></aside>
+        <article className="chart-panel"><div className="chart-panel-head"><div><p>LIVE GRAPH</p><h2>{selected.label}</h2><span>{selected.detail}</span></div><strong>{selectedValue}</strong></div><div className="chart-controls"><div className="metric-picker" role="group" aria-label="選擇圖表項目">{metricOptions.map((item) => <button key={item.id} type="button" className={metric === item.id ? "selected" : ""} onClick={() => setMetric(item.id)}>{item.label}</button>)}</div><div className="chart-state"><span className={`live-dot ${status}`} /> {status === "live" ? "Streaming" : "Waiting"}</div></div><SelectedMetricChart metric={metric} points={points} /></article></section>
+      <section className="below-graph" id="routes"><article className="current-summary"><div><span>Current bandwidth</span><strong>{rate(current.throughput)}</strong></div><div><span>Current requests</span><strong>{compact(current.rpm)} RPM</strong></div><div><span>5 min edge data</span><strong>{(totalBytes / 1024 / 1024).toFixed(1)} MiB</strong></div></article><article className="routes-panel"><div className="routes-head"><h2>Top routes</h2><span>Cloudflare edge data</span></div>{paths.length ? <table><thead><tr><th>PATH</th><th>REQUESTS</th></tr></thead><tbody>{paths.map((row) => <tr key={row.path}><td><code>{row.path}</code></td><td>{row.requests}</td></tr>)}</tbody></table> : <p className="empty-routes">Waiting for Cloudflare Analytics route data…</p>}</article></section>
+    </section>
   </main>;
 }
