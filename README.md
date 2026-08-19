@@ -37,13 +37,19 @@ The target services being tested can remain proxied through Cloudflare as usual.
 
 ## Test-agent integration
 
-The current UI includes a live telemetry simulator so the dashboard can be
-previewed immediately. The **Agent endpoint** field in the test runner is the
-integration point for a self-hosted test agent. The agent should be responsible
-for raw TCP/UDP work and controlled HTTP load, because browsers cannot open raw
-L4 sockets or emit packets directly.
+The dashboard now reads read-only HTTP edge analytics from Cloudflare. Configure
+the values in `.env` (copy `.env.example`) and restart the app. The token must
+not be committed to GitHub. The current dashboard observes Cloudflare traffic
+without generating load on your origin; packets and p99 latency require extra
+Cloudflare products or an optional test agent.
 
-Recommended API shape:
+Cloudflare settings:
+
+- `CLOUDFLARE_API_TOKEN` — Account Analytics read-only token
+- `CLOUDFLARE_ZONE_ID` — the zone ID for the monitored hostname
+- `CLOUDFLARE_HOSTNAME` — for example `dstat.kdns.fr`
+
+Optional test-agent API shape:
 
 - `POST /tests` — start an L7 HTTP, L4 TCP, or L4 UDP run
 - `GET /tests/:id/events` — stream `rpm`, `gbps`, `packets`, `latency`, and status
