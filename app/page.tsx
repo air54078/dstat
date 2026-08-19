@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 
 type ChartMetric = "bandwidth" | "requests" | "data";
 type Point = { time: string; bandwidth: number; requests: number; bytes: number };
@@ -49,6 +49,7 @@ function axisLabel(value: number, unit: string) {
 }
 
 function SelectedMetricChart({ metric, points }: { metric: ChartMetric; points: Point[] }) {
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const safePoints = points.length > 1 ? points : emptyPoints;
   const { values, unit } = chartValues(safePoints, metric);
   const maximum = niceMax(Math.max(...values, 0) * 1.12);
@@ -61,15 +62,24 @@ function SelectedMetricChart({ metric, points }: { metric: ChartMetric; points: 
   const lastY = 91 - Math.min(values[values.length - 1] / maximum, 1) * 78;
   const labels = [1, .75, .5, .25, 0].map((ratio) => axisLabel(maximum * ratio, unit));
   const xIndexes = [0, Math.floor((safePoints.length - 1) / 4), Math.floor((safePoints.length - 1) / 2), Math.floor((safePoints.length - 1) * .75), safePoints.length - 1];
+  const hoverX = hoverIndex === null ? null : 4 + (hoverIndex / Math.max(values.length - 1, 1)) * 92;
+  const hoverValue = hoverIndex === null ? null : values[hoverIndex];
+  const handleMove = (event: MouseEvent<SVGSVGElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
+    setHoverIndex(Math.min(values.length - 1, Math.max(0, Math.round(ratio * (values.length - 1)))));
+  };
 
   return <div className="chart-area-wrap">
     <div className="chart-y-axis" aria-hidden="true">{labels.map((label) => <span key={label}>{label}</span>)}</div>
-    <svg className="main-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${metricOptions.find((item) => item.id === metric)?.label} chart`}>
+    <svg className="main-chart" viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label={`${metricOptions.find((item) => item.id === metric)?.label} chart`} onMouseMove={handleMove} onMouseLeave={() => setHoverIndex(null)}>
       {[13, 32.5, 52, 71.5, 91].map((y) => <line key={y} x1="4" x2="96" y1={y} y2={y} className="chart-grid-line" />)}
       <polygon points={area} className="chart-fill" />
       <polyline points={line} className="chart-series" />
+      {hoverX !== null && <><line x1={hoverX} x2={hoverX} y1="13" y2="91" className="chart-hover-line" /><circle cx={hoverX} cy={91 - Math.min((hoverValue ?? 0) / maximum, 1) * 78} r="1.8" className="chart-hover-point" /></>}
       <circle cx="96" cy={lastY} r="1.25" className="chart-last-point" />
     </svg>
+    {hoverIndex !== null && <div className="chart-tooltip" style={{ left: `${Math.min(Math.max(4 + (hoverIndex / Math.max(values.length - 1, 1)) * 92, 13), 87)}%` }}><span>{safePoints[hoverIndex].time}</span><strong>{axisLabel(hoverValue ?? 0, unit)}</strong></div>}
     <div className="chart-x-axis" aria-hidden="true">{xIndexes.map((index, position) => <span key={`${index}-${position}`}>{position === xIndexes.length - 1 ? "NOW" : safePoints[index].time}</span>)}</div>
   </div>;
 }
@@ -86,21 +96,31 @@ export default function Home() {
 
   useEffect(() => {
     let closed = false;
+    let inFlight = false;
+    let lastSignature = "";
     const poll = async () => {
+      if (closed || inFlight) return;
+      inFlight = true;
       setRefreshing(true);
       try {
         const response = await fetch(`/api/cloudflare/analytics?t=${Date.now()}`, { cache: "no-store" });
         const data = await response.json();
         if (closed) return;
         if (!response.ok) throw new Error(data.error ?? "Analytics unavailable");
-        setPoints(data.series?.length ? data.series : emptyPoints);
-        setPaths(data.topPaths ?? []);
-        setCurrent({ throughput: data.current?.throughput ?? 0, rpm: data.current?.rpm ?? 0 });
-        setLastUpdated(data.refreshedAt ?? new Date().toISOString());
+        const nextPoints = data.series?.length ? data.series : emptyPoints;
+        const signature = JSON.stringify({ refreshedAt: data.refreshedAt, current: data.current, series: nextPoints, paths: data.topPaths });
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          setPoints(nextPoints);
+          setPaths(data.topPaths ?? []);
+          setCurrent({ throughput: data.current?.throughput ?? 0, rpm: data.current?.rpm ?? 0 });
+          setLastUpdated(data.refreshedAt ?? new Date().toISOString());
+        }
         setStatus("live");
       } catch {
         if (!closed) setStatus("offline");
       } finally {
+        inFlight = false;
         if (!closed) setRefreshing(false);
       }
     };
