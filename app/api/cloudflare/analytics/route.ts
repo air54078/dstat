@@ -6,6 +6,9 @@ type CloudflareGroup = {
   dimensions?: { datetimeMinute?: string; clientRequestPath?: string };
 };
 
+let analyticsCache: { expiresAt: number; payload: Record<string, unknown> } | null = null;
+const UPSTREAM_CACHE_MS = 5_000;
+
 const query = `query DstatAnalytics($zoneTag: string!, $filter: filter!, $pathFilter: filter!) {
   viewer {
     zones(filter: { zoneTag: $zoneTag }) {
@@ -30,6 +33,10 @@ export async function GET() {
 
   if (!token || !zoneTag || !hostname) {
     return NextResponse.json({ configured: false, error: "Cloudflare Analytics is not configured." }, { status: 503 });
+  }
+
+  if (analyticsCache && analyticsCache.expiresAt > Date.now()) {
+    return NextResponse.json(analyticsCache.payload, { headers: { "Cache-Control": "no-store" } });
   }
 
   const end = new Date();
@@ -64,7 +71,9 @@ export async function GET() {
     const topPaths = (zone?.topPaths ?? []).map((group) => ({
       method: "HTTP", path: group.dimensions?.clientRequestPath ?? "/", requests: `${((group.count ?? 0) / 1000).toFixed(1)}k`, latency: "—", status: "—",
     }));
-    return NextResponse.json({ configured: true, current, series: series.map((point) => ({ time: point.time.slice(11, 16), value: (point.bytes * 8) / 60 / 1e9 })), topPaths, source: hostname, refreshedAt: end.toISOString() }, { headers: { "Cache-Control": "no-store" } });
+    const result = { configured: true, current, series: series.map((point) => ({ time: point.time.slice(11, 16), value: (point.bytes * 8) / 60 / 1e9 })), topPaths, source: hostname, refreshedAt: end.toISOString() };
+    analyticsCache = { expiresAt: Date.now() + UPSTREAM_CACHE_MS, payload: result };
+    return NextResponse.json(result, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     return NextResponse.json({ configured: true, error: error instanceof Error ? error.message : "Cloudflare Analytics request failed" }, { status: 502 });
   }
